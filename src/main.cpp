@@ -7,8 +7,8 @@
 #include <string>
 #include <optional>
 #include <chrono>
-#include <thread>
 #include <algorithm>
+#include <variant>
 
 enum class Token
 {
@@ -18,7 +18,7 @@ enum class Token
     END_OF_FILE
 };
 
-std::string_view token_to_string(Token const tok)
+[[nodiscard]] std::string_view token_to_string(Token const tok)
 {
     switch (tok)
     {
@@ -45,13 +45,12 @@ void usage(std::string_view app_name)
     std::cout << "Usage: " << app_name << " [file]\n";
 }
 
-std::string read_file(std::filesystem::path const &path)
+[[nodiscard]] std::string read_file(std::filesystem::path const &path)
 {
     std::ifstream file(path, std::fstream::ate);
     const auto size = file.tellg();
     file.seekg(0);
-    std::string output;
-    output.resize(static_cast<std::size_t>(size));
+    std::string output(static_cast<std::size_t>(size), ' ');
     if (!file.read(output.data(), size))
     {
         return {};
@@ -60,7 +59,7 @@ std::string read_file(std::filesystem::path const &path)
     return output;
 }
 
-std::vector<Token> tokenise(std::string const &program)
+[[nodiscard]] std::vector<Token> tokenise(std::string const &program)
 {
     std::vector<Token> tokens;
 
@@ -118,7 +117,7 @@ enum class InstructionType
     ReadNum
 };
 
-std::string instruction_to_string(InstructionType type)
+[[nodiscard]] std::string instruction_to_string(InstructionType type)
 {
     switch (type)
     {
@@ -201,24 +200,7 @@ std::string instruction_to_string(InstructionType type)
 struct Instruction
 {
     InstructionType type;
-    int number{0};
-    std::string string{};
-    bool is_number{false};
-    bool is_string{false};
-
-    Instruction() = delete;
-
-    Instruction(InstructionType t) : type(t)
-    {
-    }
-
-    Instruction(InstructionType t, int num) : type(t), number(num), is_number(true)
-    {
-    }
-
-    Instruction(InstructionType t, std::string s) : type(t), string(std::move(s)), is_string(true)
-    {
-    }
+    std::variant<int, std::string> data;
 };
 
 std::vector<Instruction> parse(std::vector<Token> const &tokens)
@@ -232,17 +214,17 @@ std::vector<Instruction> parse(std::vector<Token> const &tokens)
 
     std::size_t current_index = 0;
 
-    auto consume = [&]
+    const auto consume = [&]
     {
         return tokens[++current_index];
     };
 
-    auto peek = [&](std::size_t ahead)
+    const auto peek = [&](std::size_t ahead)
     {
         return tokens[current_index + ahead];
     };
 
-    auto parse_number = [&]
+    const auto parse_number = [&]
     {
         std::vector<int> digits;
         auto current_digit = consume();
@@ -260,11 +242,10 @@ std::vector<Instruction> parse(std::vector<Token> const &tokens)
             current_digit = consume();
         }
 
-        bool is_negative = digits.front() == 1 ? true : false;
-        digits.erase(std::begin(digits));
+        const bool is_negative = digits.front() == 1;
 
         int num = 0;
-        for (std::size_t i = 0; i < digits.size(); i++)
+        for (std::size_t i = 1; i < digits.size(); i++)
         {
             num += static_cast<int>(std::pow(2, digits.size() - 1 - i) * digits[i]);
         }
@@ -272,14 +253,15 @@ std::vector<Instruction> parse(std::vector<Token> const &tokens)
         return is_negative ? num * -1 : num;
     };
 
-    auto parse_string = [&]
+    const auto parse_string = [&]
     {
         std::string s;
         auto current_digit = consume();
         while (current_digit != Token::NEWLINE)
         {
+            constexpr std::size_t BINARY_CHAR_SIZE = 8;
             std::vector<int> digits;
-            for (std::size_t i = 0; i < 8; i++)
+            for (std::size_t i = 0; i < BINARY_CHAR_SIZE; i++)
             {
                 if (current_digit == Token::SPACE)
                 {
@@ -308,167 +290,129 @@ std::vector<Instruction> parse(std::vector<Token> const &tokens)
         return s;
     };
 
+    const auto match = [&]<typename... Ts>(Ts... toks)
+    {
+        std::array<Token, sizeof...(toks)> list{toks...};
+        for (std::size_t i = 0; i < list.size(); i++)
+        {
+            if (peek(i) != list[i])
+            {
+                return false;
+            }
+        }
+
+        for (std::size_t i = 0; i < list.size() - 1; i++)
+        {
+            consume();
+        }
+
+        return true;
+    };
+
     auto current = tokens[0];
 
     while (current != Token::END_OF_FILE)
     {
         // IMP : [SPACE] : Stack manipulation
-        if (current == Token::SPACE && peek(1) == Token::SPACE)
+        if (match(Token::SPACE, Token::SPACE))
         {
-            consume();
-            instructions.push_back(Instruction(InstructionType::Push, parse_number()));
+            instructions.emplace_back(InstructionType::Push, parse_number());
         }
-        else if (current == Token::SPACE && peek(1) == Token::NEWLINE && peek(2) == Token::SPACE)
+        else if (match(Token::SPACE, Token::NEWLINE, Token::SPACE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction{InstructionType::Dup});
+            instructions.emplace_back(InstructionType::Dup);
         }
-        else if (current == Token::SPACE && peek(1) == Token::TAB && peek(2) == Token::SPACE)
+        else if (match(Token::SPACE, Token::TAB, Token::SPACE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Ref, parse_number()));
+            instructions.emplace_back(InstructionType::Ref, parse_number());
         }
-        else if (current == Token::SPACE && peek(1) == Token::TAB && peek(2) == Token::NEWLINE)
+        else if (match(Token::SPACE, Token::TAB, Token::NEWLINE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Slide, parse_number()));
+            instructions.emplace_back(InstructionType::Slide, parse_number());
         }
-        else if (current == Token::SPACE && peek(1) == Token::NEWLINE && peek(2) == Token::TAB)
+        else if (match(Token::SPACE, Token::NEWLINE, Token::TAB))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Swap));
+            instructions.emplace_back(InstructionType::Swap);
         }
-        else if (current == Token::SPACE && peek(1) == Token::NEWLINE && peek(2) == Token::NEWLINE)
+        else if (match(Token::SPACE, Token::NEWLINE, Token::NEWLINE))
         {
-            consume();
-            consume();
-
-            instructions.push_back(Instruction(InstructionType::Discard));
+            instructions.emplace_back(InstructionType::Discard);
         }
         // IMP : [TAB][SPACE] : Arithmetic operations
-        else if (current == Token::TAB && peek(1) == Token::SPACE && peek(2) == Token::SPACE && peek(3) == Token::SPACE)
+        else if (match(Token::TAB, Token::SPACE, Token::SPACE, Token::SPACE))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::InfixPlus));
+            instructions.emplace_back(InstructionType::InfixPlus);
         }
-        else if (current == Token::TAB && peek(1) == Token::SPACE && peek(2) == Token::SPACE && peek(3) == Token::TAB)
+        else if (match(Token::TAB, Token::SPACE, Token::SPACE, Token::TAB))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::InfixMinus));
+            instructions.emplace_back(InstructionType::InfixMinus);
         }
-        else if (current == Token::TAB && peek(1) == Token::SPACE && peek(2) == Token::SPACE && peek(3) == Token::NEWLINE)
+        else if (match(Token::TAB, Token::SPACE, Token::SPACE, Token::NEWLINE))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::InfixTimes));
+            instructions.emplace_back(InstructionType::InfixTimes);
         }
-        else if (current == Token::TAB && peek(1) == Token::SPACE && peek(2) == Token::TAB && peek(3) == Token::SPACE)
+        else if (match(Token::TAB, Token::SPACE, Token::TAB, Token::SPACE))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::InfixDivide));
+            instructions.emplace_back(InstructionType::InfixDivide);
         }
-        else if (current == Token::TAB && peek(1) == Token::SPACE && peek(2) == Token::TAB && peek(3) == Token::TAB)
+        else if (match(Token::TAB, Token::SPACE, Token::TAB, Token::TAB))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::InfixModulo));
+            instructions.emplace_back(InstructionType::InfixModulo);
         }
         // IMP : [TAB][TAB] : Heap Access
-        else if (current == Token::TAB && peek(1) == Token::TAB && peek(2) == Token::SPACE)
+        else if (match(Token::TAB, Token::TAB, Token::SPACE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Store));
+            instructions.emplace_back(InstructionType::Store);
         }
-        else if (current == Token::TAB && peek(1) == Token::TAB && peek(2) == Token::TAB)
+        else if (match(Token::TAB, Token::TAB, Token::TAB))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Retrieve));
+            instructions.emplace_back(InstructionType::Retrieve);
         }
         // IMP : [LineFeed] : Control Flow
-        else if (current == Token::NEWLINE && peek(1) == Token::SPACE && peek(2) == Token::SPACE)
+        else if (match(Token::NEWLINE, Token::SPACE, Token::SPACE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Label, parse_string()));
+            instructions.emplace_back(InstructionType::Label, parse_string());
         }
-        else if (current == Token::NEWLINE && peek(1) == Token::SPACE && peek(2) == Token::TAB)
+        else if (match(Token::NEWLINE, Token::SPACE, Token::TAB))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Call, parse_string()));
+            instructions.emplace_back(InstructionType::Call, parse_string());
         }
-        else if (current == Token::NEWLINE && peek(1) == Token::SPACE && peek(2) == Token::NEWLINE)
+        else if (match(Token::NEWLINE, Token::SPACE, Token::NEWLINE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Jump, parse_string()));
+            instructions.emplace_back(InstructionType::Jump, parse_string());
         }
-        else if (current == Token::NEWLINE && peek(1) == Token::TAB && peek(2) == Token::SPACE)
+        else if (match(Token::NEWLINE, Token::TAB, Token::SPACE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::IfZero, parse_string()));
+            instructions.emplace_back(InstructionType::IfZero, parse_string());
         }
-        else if (current == Token::NEWLINE && peek(1) == Token::TAB && peek(2) == Token::TAB)
+        else if (match(Token::NEWLINE, Token::TAB, Token::TAB))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::IfNegative, parse_string()));
+            instructions.emplace_back(InstructionType::IfNegative, parse_string());
         }
-        else if (current == Token::NEWLINE && peek(1) == Token::TAB && peek(2) == Token::NEWLINE)
+        else if (match(Token::NEWLINE, Token::TAB, Token::NEWLINE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::Return));
+            instructions.emplace_back(InstructionType::Return);
         }
-        else if (current == Token::NEWLINE && peek(1) == Token::NEWLINE && peek(2) == Token::NEWLINE)
+        else if (match(Token::NEWLINE, Token::NEWLINE, Token::NEWLINE))
         {
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::End));
+            instructions.emplace_back(InstructionType::End);
         }
         // IMP : [TAB][NEWLINE] : IO instructions
-        else if (current == Token::TAB && peek(1) == Token::NEWLINE && peek(2) == Token::SPACE && peek(3) == Token::SPACE)
+        else if (match(Token::TAB, Token::NEWLINE, Token::SPACE, Token::SPACE))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::OutputChar));
+            instructions.emplace_back(InstructionType::OutputChar);
         }
-        else if (current == Token::TAB && peek(1) == Token::NEWLINE && peek(2) == Token::SPACE && peek(3) == Token::TAB)
+        else if (match(Token::TAB, Token::NEWLINE, Token::SPACE, Token::TAB))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::OutputNum));
+            instructions.emplace_back(InstructionType::OutputNum);
         }
-        else if (current == Token::TAB && peek(1) == Token::NEWLINE && peek(2) == Token::TAB && peek(3) == Token::SPACE)
+        else if (match(Token::TAB, Token::NEWLINE, Token::TAB, Token::SPACE))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::ReadChar));
+            instructions.emplace_back(InstructionType::ReadChar);
         }
-        else if (current == Token::TAB && peek(1) == Token::NEWLINE && peek(2) == Token::TAB && peek(3) == Token::TAB)
+        else if (match(Token::TAB, Token::NEWLINE, Token::TAB, Token::TAB))
         {
-            consume();
-            consume();
-            consume();
-            instructions.push_back(Instruction(InstructionType::ReadNum));
+            instructions.emplace_back(InstructionType::ReadNum);
         }
         else
         {
@@ -496,12 +440,12 @@ public:
         return values[idx];
     }
 
-    std::size_t size() const
+    [[nodiscard]] std::size_t size() const
     {
         return values.size();
     }
 
-    int top() const
+    [[nodiscard]] int top() const
     {
         return values.back();
     }
@@ -531,11 +475,35 @@ public:
     }
 };
 
+class Heap
+{
+    mutable std::vector<int> values;
+
+public:
+    [[nodiscard]] int &operator[](std::size_t idx)
+    {
+        if (values.size() <= idx)
+        {
+            values.resize(idx + 1, 0);
+        }
+        return values[idx];
+    }
+
+    [[nodiscard]] int const &operator[](std::size_t idx) const
+    {
+        if (values.size() <= idx)
+        {
+            values.resize(idx + 1, 0);
+        }
+        return values[idx];
+    }
+};
+
 struct VM
 {
     Stack value_stack;
     Stack call_stack;
-    std::vector<int> memory;
+    Heap memory;
     std::size_t program_counter{0};
 };
 
@@ -546,10 +514,9 @@ std::optional<std::size_t> find_label(std::vector<Instruction> const &instructio
         switch (instructions[i].type)
         {
         case InstructionType::Label:
-            if (instructions[i].string == label)
+            if (std::get<std::string>(instructions[i].data) == label)
             {
                 return {i};
-                break;
             }
         default:
             continue;
@@ -563,6 +530,20 @@ void run_vm(std::vector<Instruction> const &instructions)
 {
     VM vm;
 
+    const auto jump_to = [&](auto const &label)
+    {
+        const auto jump = find_label(instructions, label);
+        if (!jump)
+        {
+            std::cerr << "Undefined label " << label << '\n';
+            std::terminate();
+        }
+        else
+        {
+            vm.program_counter = *jump;
+        }
+    };
+
     while (true)
     {
         const auto current_instruction = instructions[vm.program_counter++];
@@ -570,16 +551,16 @@ void run_vm(std::vector<Instruction> const &instructions)
         switch (current_instruction.type)
         {
         case InstructionType::Push:
-            vm.value_stack.push(current_instruction.number);
+            vm.value_stack.push(std::get<int>(current_instruction.data));
             break;
         case InstructionType::Dup:
             vm.value_stack.push(vm.value_stack.top());
             break;
         case InstructionType::Ref:
-            vm.value_stack.push(vm.value_stack[static_cast<std::size_t>(current_instruction.number)]);
+            vm.value_stack.push(vm.value_stack[static_cast<std::size_t>(std::get<int>(current_instruction.data))]);
             break;
         case InstructionType::Slide:
-            vm.value_stack.slide(static_cast<std::size_t>(current_instruction.number));
+            vm.value_stack.slide(static_cast<std::size_t>(std::get<int>(current_instruction.data)));
             break;
         case InstructionType::Swap:
             vm.value_stack.swap();
@@ -630,11 +611,7 @@ void run_vm(std::vector<Instruction> const &instructions)
             std::string char_input;
             std::getline(std::cin, char_input);
             const auto loc = static_cast<std::size_t>(std::abs(vm.value_stack.pop()));
-            if (vm.memory.size() <= loc)
-            {
-                vm.memory.resize(loc + 1, 0);
-            }
-            const auto character = char_input.empty() ? '\n' : static_cast<int>(char_input[0]);
+            const auto character = char_input.empty() ? '\n' : static_cast<unsigned char>(char_input[0]);
             vm.memory[loc] = character;
         }
         break;
@@ -646,10 +623,6 @@ void run_vm(std::vector<Instruction> const &instructions)
             std::string number_input;
             std::getline(std::cin, number_input);
             const auto loc = static_cast<std::size_t>(vm.value_stack.pop());
-            if (vm.memory.size() <= loc)
-            {
-                vm.memory.resize(loc + 1, 0);
-            }
             const int number = std::stoi(number_input);
             vm.memory[loc] = number;
         }
@@ -660,68 +633,33 @@ void run_vm(std::vector<Instruction> const &instructions)
         case InstructionType::Call:
         {
             vm.call_stack.push(static_cast<int>(vm.program_counter));
-            const auto label = current_instruction.string;
-            const auto jump = find_label(instructions, label);
-            if (!jump)
-            {
-                std::cerr << "Undefined label " << label << '\n';
-                std::terminate();
-            }
-            else
-            {
-                vm.program_counter = *jump;
-            }
+            const auto label = std::get<std::string>(current_instruction.data);
+            jump_to(label);
         }
         break;
         case InstructionType::Jump:
         {
-            const auto jump = find_label(instructions, current_instruction.string);
-            if (!jump)
-            {
-                std::cerr << "Undefined label " << current_instruction.string << '\n';
-                std::terminate();
-            }
-            else
-            {
-                vm.program_counter = *jump;
-            }
+            const auto label = std::get<std::string>(current_instruction.data);
+            jump_to(label);
         }
         break;
         case InstructionType::IfNegative:
         {
-            const auto label = current_instruction.string;
             const auto n = vm.value_stack.pop();
             if (n < 0)
             {
-                const auto jump = find_label(instructions, label);
-                if (!jump)
-                {
-                    std::cerr << "Undefined label " << label << '\n';
-                    std::terminate();
-                }
-                else
-                {
-                    vm.program_counter = *jump;
-                }
+                const auto label = std::get<std::string>(current_instruction.data);
+                jump_to(label);
             }
         }
         break;
         case InstructionType::IfZero:
         {
-            const auto label = current_instruction.string;
             const auto n = vm.value_stack.pop();
             if (n == 0)
             {
-                const auto jump = find_label(instructions, label);
-                if (!jump)
-                {
-                    std::cerr << "Undefined label " << label << '\n';
-                    std::terminate();
-                }
-                else
-                {
-                    vm.program_counter = *jump;
-                }
+                const auto label = std::get<std::string>(current_instruction.data);
+                jump_to(label);
             }
         }
         break;
@@ -732,10 +670,6 @@ void run_vm(std::vector<Instruction> const &instructions)
         {
             const auto n = vm.value_stack.pop();
             const auto loc = static_cast<std::size_t>(vm.value_stack.pop());
-            if (vm.memory.size() <= loc)
-            {
-                vm.memory.resize(loc + 1, 0);
-            }
             vm.memory[loc] = n;
         }
         break;
@@ -777,11 +711,9 @@ int main(int argc, char *argv[])
         usage(app_name);
         return EXIT_FAILURE;
     }
-    else
-    {
-        std::filesystem::path file(argv[1]);
-        execute(file);
-    }
+
+    std::filesystem::path file(argv[1]);
+    execute(file);
 
     return EXIT_SUCCESS;
 }
